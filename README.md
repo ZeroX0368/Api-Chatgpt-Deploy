@@ -1,1 +1,1 @@
-# Api-Chatgpt-Deploy
+api/chat?message=hello
