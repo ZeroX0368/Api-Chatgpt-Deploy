@@ -1,1 +1,4 @@
-api/chat?message=hello
+# json POST /api/chat
+{
+  "message": "what is javascript"
+}
