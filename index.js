@@ -1,118 +1,221 @@
 
 const express = require('express');
-const https = require('https');
-const app = express();
+const cors = require('cors');
+const axios = require('axios');
 
-// Middleware to parse JSON
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
+app.use(cors());
 app.use(express.json());
 
-// CORS middleware
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-});
-
-// Helper function to make HTTPS requests
-function makeRequest(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      let data = '';
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-      res.on('end', () => {
-        resolve(data);
-      });
-    }).on('error', (err) => {
-      reject(err);
-    });
-  });
+// Helper function to parse options from message
+function parseOptions(message) {
+  const options = {
+    imagine: message.includes('--imagine'),
+    think: message.includes('--think'),
+    web: message.includes('--web'),
+    deep: message.includes('--deep'),
+    memory: message.includes('--memory')
+  };
+  
+  // Remove options from message to get clean prompt
+  const prompt = message.replace(/--\w+/g, '').trim();
+  
+  return { options, prompt };
 }
 
-// ChatGPT-like API endpoint
+// Helper function to get cookies from Blackbox AI
+async function getCookies() {
+  try {
+    const response = await axios.head('https://www.blackbox.ai/');
+    const cookies = response.headers['set-cookie'];
+    return cookies ? cookies.join('; ') : '';
+  } catch (error) {
+    throw new Error('Failed to get cookies');
+  }
+}
+
+// Helper function to make chat request
+async function makeChatRequest(prompt, options, cookies) {
+  const { imagine, think, web, deep, memory } = options;
+  
+  // Override configure - if image option is used with other options, disable others
+  const useImageParameter = imagine;
+  const exceptImageParameter = think || web || deep;
+  
+  let finalThink = think;
+  let finalWeb = web;
+  let finalDeep = deep;
+  
+  if (exceptImageParameter && useImageParameter) {
+    finalThink = false;
+    finalWeb = false;
+    finalDeep = false;
+  }
+
+  const bodyData = {
+    messages: [{
+      id: null,
+      content: prompt,
+      role: "user"
+    }],
+    agentMode: {},
+    id: null,
+    previewToken: null,
+    userId: null,
+    codeModelMode: true,
+    trendingAgentMode: {},
+    isMicMode: false,
+    userSystemPrompt: null,
+    maxTokens: 1024,
+    playgroundTopP: null,
+    playgroundTemperature: null,
+    isChromeExt: false,
+    githubToken: "",
+    clickedAnswer2: false,
+    clickedAnswer3: false,
+    clickedForceWebSearch: false,
+    visitFromDelta: false,
+    isMemoryEnabled: false,
+    mobileClient: false,
+    userSelectedModel: null,
+    validated: "00f37b34-a166-4efb-bce5-1312d87f2f94",
+    imageGenerationMode: imagine,
+    webSearchModePrompt: finalWeb,
+    deepSearchMode: finalDeep,
+    domains: null,
+    vscodeClient: false,
+    codeInterpreterMode: false,
+    customProfile: "",
+    session: {
+      user: { name: "", email: "", image: "", id: "" },
+      expires: ""
+    },
+    isPremium: false,
+    subscriptionCache: null,
+    beastMode: false,
+    reasoningMode: finalThink
+  };
+
+  const headers = {
+    'Cookie': cookies,
+    'Origin': 'https://www.blackbox.ai',
+    'Referer': 'https://www.blackbox.ai',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+    'Content-Type': 'application/json'
+  };
+
+  const response = await axios.post('https://www.blackbox.ai/api/chat', bodyData, { headers });
+  return response.data;
+}
+
+// Helper function to process response
+function processResponse(responseData) {
+  const responseText = responseData.toString();
+  
+  // Check for quick response (web search results)
+  const quickMatch = responseText.match(/\$~~~\$(.*)/s);
+  const quickResult = quickMatch ? quickMatch[1] : '';
+  
+  // Check for thinking process
+  const thinkMatch = responseText.match(/<think>(.*?)<\/think>/s);
+  const thinkResult = thinkMatch ? thinkMatch[1] : '';
+  
+  // Get final result
+  let finalResult;
+  if (thinkResult) {
+    finalResult = responseText.split('</think>')[1] || '';
+  } else if (quickResult) {
+    finalResult = responseText.split('$~~~$')[2] || '';
+  } else {
+    finalResult = responseText;
+  }
+  
+  return {
+    response: finalResult.trim(),
+    thinking: thinkResult.trim(),
+    webSearch: quickResult.trim(),
+    raw: responseText
+  };
+}
+
+// Chat endpoint
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, prompt } = req.body;
+    const { message } = req.body;
     
     if (!message) {
       return res.status(400).json({ error: 'Message is required' });
     }
-
-    // Construct the prompt for Pollinations AI
-    const fullPrompt = prompt ? `${prompt}\n\nUser: ${message}\nAssistant:` : `User: ${message}\nAssistant:`;
-    const encodedPrompt = encodeURIComponent(fullPrompt);
     
-    // Make request to Pollinations AI
-    const url = `https://text.pollinations.ai/${encodedPrompt}`;
-    const response = await makeRequest(url);
+    const { options, prompt } = parseOptions(message);
+    
+    if (!prompt) {
+      return res.status(400).json({ error: 'Prompt is required' });
+    }
+    
+    // Get cookies
+    const cookies = await getCookies();
+    
+    // Make chat request
+    const responseData = await makeChatRequest(prompt, options, cookies);
+    
+    // Process response
+    const processedResponse = processResponse(responseData);
     
     res.json({
       success: true,
-      message: message,
-      response: response.trim(),
-      Credits: 'Bucu0368'
+      prompt,
+      options,
+      ...processedResponse
     });
     
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error:', error.message);
     res.status(500).json({ 
-      error: 'Failed to generate response',
-      details: error.message 
+      error: 'Internal server error',
+      message: error.message 
     });
   }
 });
 
-// Simple GET endpoint for testing
-app.get('/api/chat', async (req, res) => {
-  try {
-    const message = req.query.message || 'hello';
-    const encodedPrompt = encodeURIComponent(`User: ${message}\nAssistant:`);
-    
-    const url = `https://text.pollinations.ai/${encodedPrompt}`;
-    const response = await makeRequest(url);
-    
-    res.json({
-      success: true,
-      message: message,
-      response: response.trim(),
-      Credits: 'Bucu0368'
-    });
-    
-  } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ 
-      error: 'Failed to generate response',
-      details: error.message 
-    });
-  }
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Root endpoint
-app.get('/', (req, res) => {
+// API documentation endpoint
+app.get('/api/docs', (req, res) => {
   res.json({
-    message: 'ChatGPT API using Pollinations AI',
+    title: 'Blackbox AI Chat API',
     endpoints: {
-      'GET /api/chat?message=hello': 'Simple chat endpoint',
-      'POST /api/chat': 'Chat endpoint with body { "message": "your message", "prompt": "optional system prompt" }'
-    },
-    example: {
-      url: '/api/chat?message=hello',
-      post_body: {
-        message: 'What is the weather like?',
-        prompt: 'You are a helpful assistant.'
+      'POST /api/chat': {
+        description: 'Send a message to Blackbox AI',
+        body: {
+          message: 'string - The message with optional flags (--think, --web, --deep, --imagine, --memory)'
+        },
+        example: {
+          message: '--think --web What is the capital of France?'
+        }
+      },
+      'GET /api/health': {
+        description: 'Health check endpoint'
       }
+    },
+    options: {
+      '--think': 'Think before responding',
+      '--web': 'Search the web',
+      '--deep': 'For complex tasks',
+      '--imagine': 'Generate images',
+      '--memory': 'Memorize chat (experimental)'
     }
   });
 });
 
-const PORT = process.env.PORT || 5000;
+// Start server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`ChatGPT API server running on port ${PORT}`);
-  console.log(`Try: GET /api/chat?message=hello`);
+  console.log(`Server running on port ${PORT}`);
+  console.log(`API Documentation: http://localhost:${PORT}/api/docs`);
 });
